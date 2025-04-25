@@ -1,0 +1,304 @@
+import streamlit as st
+import os
+import time
+import re
+import subprocess
+import threading
+import pyttsx3
+import speech_recognition as sr
+from langchain.chains import RetrievalQA
+from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+from langchain_ollama import OllamaLLM, OllamaEmbeddings
+from langchain_chroma import Chroma
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.prompts import PromptTemplate
+from langchain.memory import ConversationBufferMemory
+from streamlit.components.v1 import html as st_html
+
+# Set page config to wide layout
+st.set_page_config(layout="wide")
+
+# ========= Load External CSS =========
+with open("style.css") as f:
+    st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+# ========= Custom CSS for ChatGPT-Style Layout =========
+st.markdown(
+    """
+    <style>
+    /* Chat container: occupies all space above the fixed input (70px tall) */
+    .chat-container {
+        position: fixed;
+        top: 0;
+        bottom: 70px;  /* leave space for input bar */
+        width: 100%;
+        overflow-y: auto;
+        padding: 1rem;
+        background-color: #f7f7f7;
+    }
+    
+    /* Chat message bubbles */
+    .message {
+        max-width: 80%;
+        margin: 0.5rem auto;
+        padding: 0.75rem 1rem;
+        border-radius: 5px;
+        line-height: 1.4;
+        word-wrap: break-word;
+    }
+    .user-msg {
+        background-color: #ececf1;
+        text-align: right;
+    }
+    .assistant-msg {
+        background-color: #ffffff;
+        text-align: left;
+    }
+    
+    /* Fixed input bar at bottom, styled like ChatGPT */
+    .fixed-bottom {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        background-color: #ffffff;
+        padding: 0.5rem;
+        border-top: 1px solid #ddd;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 999;
+    }
+    /* Input styling */
+    .stTextInput input {
+        flex: 1;
+        padding: 0.5rem;
+        margin-right: 0.5rem;
+        border-radius: 5px;
+        border: 1px solid #ddd;
+    }
+    /* Send button styling */
+    .stButton button {
+        padding: 0.5rem;
+        border-radius: 5px;
+        background-color: #f0f0f0;
+        border: 1px solid #ddd;
+        cursor: pointer;
+        width: 40px;
+        height: 40px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# ========= Setup =========
+os.makedirs("files", exist_ok=True)
+os.makedirs("jj", exist_ok=True)
+
+# ========= GPU Info =========
+try:
+    gpu_log = subprocess.check_output([
+        "nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used",
+        "--format=csv,noheader,nounits"
+    ])
+    st.sidebar.markdown("### GPU Status")
+    st.sidebar.code(gpu_log.decode("utf-8"))
+except Exception:
+    st.sidebar.warning("⚠️ GPU status unavailable")
+
+# ========= Session State =========
+st.session_state.setdefault("template", """
+You are a knowledgeable chatbot, here to help with questions of the user. Your tone should be professional and informative.
+
+Context: {context}
+History: {history}
+
+User: {question}
+Chatbot:""")
+st.session_state.setdefault("prompt", PromptTemplate(
+    input_variables=["history", "context", "question"],
+    template=st.session_state.template
+))
+st.session_state.setdefault("memory", ConversationBufferMemory(
+    memory_key="history",
+    return_messages=True,
+    input_key="question"
+))
+st.session_state.setdefault("vectorstore", Chroma(
+    persist_directory="jj",
+    embedding_function=OllamaEmbeddings(base_url="http://localhost:11434", model="deepseek-r1:7b")
+))
+st.session_state.setdefault("llm", OllamaLLM(
+    base_url="http://localhost:11434",
+    model="deepseek-r1:7b",
+    verbose=False,
+    callbacks=[StreamingStdOutCallbackHandler()]
+))
+st.session_state.setdefault("chat_history", [])
+st.session_state.setdefault("last_response", "")
+
+# ========= TTS =========
+engine = pyttsx3.init()
+engine.setProperty("rate", 150)
+
+def save_to_cache(text):
+    with open("cache.txt", "w", encoding="utf-8") as f:
+        f.write(text)
+
+def read_from_cache():
+    try:
+        with open("cache.txt", "r", encoding="utf-8") as f:
+            text = f.read()
+        engine.say(text)
+        engine.runAndWait()
+    except Exception as e:
+        st.error(f"TTS Error: {e}")
+
+def stop_reading():
+    try:
+        engine.stop()
+    except Exception:
+        pass
+
+# ========= Helper: Process Text Input =========
+def process_text_input(user_input):
+    if "qa_chain" not in st.session_state:
+        st.error("Please upload a PDF to initialize the chat chain.")
+        return
+    
+    # Append user's message to chat history
+    st.session_state.chat_history.append({"role": "user", "message": user_input})
+    
+    # Process the question via the QA chain
+    with st.spinner("Thinking..."):
+        start = time.time()
+        response = st.session_state.qa_chain(user_input)
+        elapsed = time.time() - start
+    raw = response["result"][:5000]
+    
+    # Append assistant response to chat history
+    st.session_state.chat_history.append({"role": "assistant", "message": raw})
+    st.session_state.last_response = raw
+    save_to_cache(raw)
+    
+    # Rerun to update UI
+    st.experimental_rerun()
+
+# ========= Voice Input =========
+def ask_by_voice():
+    if "qa_chain" not in st.session_state:
+        st.error("Please upload a PDF to initialize the chat chain.")
+        return
+    recognizer = sr.Recognizer()
+    with sr.Microphone() as source:
+        st.info("🎤 Listening...")
+        audio = recognizer.listen(source)
+    try:
+        query = recognizer.recognize_google(audio)
+        if query.strip():
+            st.session_state.chat_history.append({"role": "user", "message": query})
+            with st.spinner("Thinking..."):
+                start = time.time()
+                response = st.session_state.qa_chain(query)
+                elapsed = time.time() - start
+            raw = response["result"][:5000]
+            st.session_state.chat_history.append({"role": "assistant", "message": raw})
+            st.session_state.last_response = raw
+            save_to_cache(raw)
+            st.experimental_rerun()
+    except Exception as e:
+        st.warning(f"Could not understand: {e}")
+
+# ========= Title =========
+st.title("🤖 JARVIS PDF Chatbot")
+
+# ========= PDF Upload =========
+uploaded_file = st.file_uploader("Upload your PDF", type="pdf")
+if uploaded_file:
+    file_path = os.path.join("files", uploaded_file.name)
+    if not os.path.exists(file_path):
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.read())
+        with st.spinner("Reading & indexing document..."):
+            pages = PyPDFLoader(file_path).load()
+            chunks = RecursiveCharacterTextSplitter(chunk_size=3500, chunk_overlap=300).split_documents(pages)
+            st.session_state.vectorstore = Chroma.from_documents(
+                documents=chunks,
+                embedding=OllamaEmbeddings(model="deepseek-r1:7b")
+            )
+            st.session_state.vectorstore.persist()
+        st.success("✅ PDF indexed")
+    st.session_state.retriever = st.session_state.vectorstore.as_retriever()
+    if "qa_chain" not in st.session_state:
+        st.session_state.qa_chain = RetrievalQA.from_chain_type(
+            llm=st.session_state.llm,
+            chain_type='stuff',
+            retriever=st.session_state.retriever,
+            chain_type_kwargs={"prompt": st.session_state.prompt, "memory": st.session_state.memory}
+        )
+
+# ========= Render Chat History (Scrollable Container) =========
+# Build HTML for the chat container and messages
+chat_html = "<div class='chat-container' id='chat-container'>"
+for msg in st.session_state.chat_history:
+    if msg["role"] == "user":
+        chat_html += f"<div class='message user-msg'>{msg['message']}</div>"
+    else:
+        chat_html += f"<div class='message assistant-msg'>{msg['message']}</div>"
+chat_html += "<div id='end-of-chat'></div></div>"
+st.markdown(chat_html, unsafe_allow_html=True)
+
+# ========= Fixed Chat Input Container (Styled like ChatGPT) =========
+st.markdown('<div class="fixed-bottom">', unsafe_allow_html=True)
+with st.form("chat_input_form", clear_on_submit=True):
+    col1, col2, col3, col4 = st.columns([6, 1, 1, 1])
+    with col1:
+        user_input = st.text_input("Ask follow-up", label_visibility="collapsed")
+    with col2:
+        mic_clicked = st.form_submit_button("🎙️")
+    with col3:
+        stop_clicked = st.form_submit_button("⏹")
+    with col4:
+        speak_clicked = st.form_submit_button("🔊")
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ========= Action Handling =========
+if mic_clicked:
+    if user_input.strip():
+        process_text_input(user_input)
+    else:
+        ask_by_voice()
+elif stop_clicked:
+    stop_reading()
+elif speak_clicked:
+    threading.Thread(target=read_from_cache, daemon=True).start()
+elif user_input.strip():
+    process_text_input(user_input)
+
+# ========= Auto-Scroll JavaScript Injection =========
+# This script adjusts the chat container height and auto-scrolls to the bottom if the user is near the bottom.
+scroll_script = """
+<script>
+(function() {
+    const chatContainer = document.getElementById('chat-container');
+    if (chatContainer) {
+        // Check if user is near the bottom (within 50px)
+        const nearBottom = (chatContainer.scrollHeight - chatContainer.clientHeight - chatContainer.scrollTop) < 50;
+        if (nearBottom) {
+            const bottomElem = document.getElementById('end-of-chat');
+            bottomElem.scrollIntoView({ behavior: 'smooth' });
+        }
+        // Adjust container height on window resize
+        window.addEventListener('resize', function() {
+            chatContainer.style.height = (window.innerHeight - 70) + "px";
+        });
+    }
+})();
+</script>
+"""
+st_html(scroll_script, height=0)

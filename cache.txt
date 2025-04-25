@@ -1,0 +1,60 @@
+<think>
+Okay, I need to help the user by converting their provided Pine Script code into a complete script. Let me start by understanding what they've given.
+
+First, looking at their code, it seems to be a mix of different Pine functions and indicators. They have variables like rsiLengthInput set to 22, which suggests they're working with RSI (Relative Strength Index). There are also references to maTypeInput as SMA (Simple Moving Average) close with a length of 14.
+
+I notice they've used multiple crossover points for long and short positions. For example, long1 is the crossover of rsi66 and 30. They've also set up some alert conditions based on these crossovers.
+
+The user mentioned converting their script into a full Pine Script. So, I should structure it properly with sections like indicators, variables, scripts, alerts, and GUIs if needed.
+
+I'll start by defining the inputs: rsiLengthInput, maTypeInput, and close for RSI calculation. Then, compute the RSI using those parameters. Next, calculate long1 to long4 and short1 to short4 based on the crossover points they provided.
+
+After that, I'll define Alert_Buy and Alert_Sell as bull and bear conditions combined with their respective crossovers and the dif > filter condition. Then, create alerts for these conditions appearing when the market trend is strong enough.
+
+For the GUI section, if enabled, display text boxes for indicators to help users make decisions based on the alerts.
+
+I should also include comments in the script to explain each part clearly. Finally, test the script mentally to ensure all parts are connected correctly and that no variables are left undefined.
+</think>
+
+Dưới đây là.script Pine complete của bạn:
+
+```pine
+//@version=4
+// Cập nhật 03/12/2023
+
+// Define Input
+rsiLengthInput = input("RSI Length", default=22, min=5, max=50)
+maTypeInput = input("MA Type for RSI", default="sma")
+closeSource = close
+
+// Calculate RSI
+rsiSource = if maTypeInput == "sma" then sma(closeSource, 14) else if maTypeInput == "ema" then ema(closeSource, 14) else if maTypeInput == "b uppercase" then bsmoothing(closeSource, 14)
+
+// Calculate RSI Values
+up66 = rma(math.max(change(rsiSource), 0), rsiLengthInput)
+downw = rma(-math.min(change(rsiSource), 0), rsiLengthInput)
+rsi66 = downw == 0 ? 100 : up66 == 0 ? 0 : 100 - (100 / (1 + up66 / downw))
+rsiMA = maTypeInput
+
+// Calculate Crossovers
+long1 = crossover(rsi66, 30)
+long2 = crossover(rsi66, 20)
+long3 = crossover(rsi66, 15)
+long4 = crossover(rsi66, 10)
+
+short1 = crossunder(rsi66, 70)
+short2 = crossunder(rsi66, 80)
+short3 = crossunder(rsi66, 85)
+short4 = crossunder(rsi66, 90)
+
+// Define Alerts
+Alert_Buy = bull() and (ma01 > ma02) and (dif > filter)
+Alert_Sell = bear() and (ma02 > ma01) and (dif > filter)
+
+// GUI
+if enabled(Gui):
+    text("RSI Length:", value=rsiLengthInput)
+    text("MA Type for RSI:", value=maTypeInput)
+```
+
+Và các phần khác của script Pine. Tôi đã sử dụng các hàm Pine để xác định rsi và các condición crossover cho long và short.
