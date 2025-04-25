@@ -57,7 +57,7 @@ Install via PowerShell or Command Prompt:
 # Upgrade pip
 python -m pip install --upgrade pip
 
-# Core libraries & requirement file installations.
+# Core libraries & requirements file installations.
 pip install -r requirements.txt
 =================================================
 pip install streamlit
